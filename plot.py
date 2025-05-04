@@ -7,6 +7,8 @@ import logging
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import webbrowser
+import shutil # Import shutil
 
 import dash
 import dash_core_components as dcc
@@ -49,7 +51,7 @@ CHARACTERISTIC_UUID = UUID("ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6")
 
 CSV_FILE = "historicalData.csv"
 MAX_DATA_LEN = 500
-MEASUREMENT_INTERVAL_MIN = 20
+MEASUREMENT_INTERVAL_MIN = 1
 MEASUREMENT_INTERVAL_SEC = MEASUREMENT_INTERVAL_MIN * 60
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -62,45 +64,79 @@ app = dash.Dash(__name__, assets_folder='assets')
 data = pd.DataFrame(columns=["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"])
 
 # --- Load Historical Data ---
-logging.info(f"Attempting to load historical data from {CSV_FILE}")
-try:
-    if os.path.exists(CSV_FILE):
-        historical_data = pd.read_csv(CSV_FILE, parse_dates=['Timestamp'])
-        if not historical_data.empty and 'Timestamp' in historical_data.columns:
-            three_days_ago = datetime.now() - timedelta(days=3)
-            # Ensure Timestamp column is timezone-naive for comparison if needed,
-            # assuming pd.Timestamp.now() used later is also naive.
-            historical_data['Timestamp'] = pd.to_datetime(historical_data['Timestamp']).dt.tz_localize(None)
-            three_days_ago = three_days_ago.tz_localize(None) # Make comparison compatible
+def load_historical_data():
+    """Load and process historical data from CSV file."""
+    global data
+    logging.info(f"Attempting to load historical data from {CSV_FILE}")
+    try:
+        if os.path.exists(CSV_FILE):
+            historical_data = pd.read_csv(CSV_FILE)
+            if historical_data.empty:
+                logging.info(f"{CSV_FILE} is empty. Starting with empty data.")
+                return
 
+            # Convert timestamp strings to datetime objects
+            try:
+                historical_data['Timestamp'] = pd.to_datetime(historical_data['Timestamp'])
+            except Exception as e:
+                logging.error(f"Error parsing timestamps: {e}")
+                return
+
+            # Remove any timezone info to ensure consistency
+            historical_data['Timestamp'] = historical_data['Timestamp'].dt.tz_localize(None)
+            
+            # Verify and fix column types
+            numeric_columns = ["Sens1", "Sens2", "Sens3", "Wroclaw"]
+            for col in numeric_columns:
+                if col in historical_data.columns:
+                    try:
+                        historical_data[col] = pd.to_numeric(historical_data[col], errors='coerce')
+                    except Exception as e:
+                        logging.error(f"Error converting {col} to numeric: {e}")
+                else:
+                    logging.warning(f"Column {col} not found in CSV, adding with NaN values")
+                    historical_data[col] = pd.NA
+
+            # Filter to last 3 days of data
+            three_days_ago = pd.Timestamp.now() - pd.Timedelta(days=3)
             recent_data = historical_data[historical_data['Timestamp'] >= three_days_ago].copy()
 
-            # Ensure required columns exist after loading
+            # Ensure we have all required columns in the correct order
             required_cols = ["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"]
             for col in required_cols:
                 if col not in recent_data.columns:
-                    logging.warning(f"Column '{col}' not found in historical data, adding with NaN.")
-                    recent_data[col] = pd.NA # Use pandas' NA marker
+                    recent_data[col] = pd.NA
 
-            # Reorder columns to match the expected format
+            # Reorder columns
             recent_data = recent_data[required_cols]
 
+            # Handle data length
             if len(recent_data) > MAX_DATA_LEN:
-                logging.info(f"Loaded {len(recent_data)} rows from the last 3 days. Truncating to {MAX_DATA_LEN} most recent.")
-                data = recent_data.iloc[-MAX_DATA_LEN:]
+                logging.info(f"Truncating to {MAX_DATA_LEN} most recent entries")
+                data = recent_data.tail(MAX_DATA_LEN)
             else:
-                logging.info(f"Loaded {len(recent_data)} rows from the last 3 days.")
                 data = recent_data
+
+            logging.info(f"Successfully loaded {len(data)} rows of historical data")
+            
+            # Verify data integrity
+            if data['Timestamp'].isna().any():
+                logging.warning("Found NaN timestamps in loaded data")
+            for col in numeric_columns:
+                nan_count = data[col].isna().sum()
+                if nan_count > 0:
+                    logging.warning(f"Found {nan_count} NaN values in {col}")
+                    
         else:
-            logging.info(f"{CSV_FILE} is empty or doesn't contain a valid 'Timestamp' column.")
-            # data remains the empty DataFrame initialized earlier
-    else:
-        logging.info(f"{CSV_FILE} not found. Starting with empty data.")
-        # data remains the empty DataFrame initialized earlier
-except Exception as e:
-    logging.error(f"Error loading or processing historical data from {CSV_FILE}: {e}")
-    # data remains the empty DataFrame initialized earlier
-# --- Load Historical Data ---
+            logging.info(f"{CSV_FILE} not found. Starting with empty data.")
+            
+    except Exception as e:
+        logging.error(f"Error loading historical data: {e}")
+        # Ensure we have a valid DataFrame even if loading fails
+        data = pd.DataFrame(columns=["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"])
+
+# Load historical data at startup
+load_historical_data()
 
 # ────────────────────────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -133,29 +169,43 @@ def get_wroclaw_temperature(api_key: str):
         return None
 
 def open_browser() -> None:
-    """Open Chromium in kiosk mode pointing at the Dash app."""
+    """Find chromium-browser and open it in kiosk mode pointing at the Dash app."""
     url = "http://127.0.0.1:8050/"
-    chromium_path = "/usr/bin/chromium-browser"
-    subprocess.Popen(
-        [
-            chromium_path,
-            "--kiosk",
-            "--force-dark-mode",
-            "--disable-restore-session-state",
-            "--disable-infobars",
-            url,
-        ]
-    )
+    chromium_path = shutil.which('chromium-browser') # Find chromium-browser in PATH
 
+    if chromium_path:
+        logging.info(f"Found chromium-browser at: {chromium_path}")
+        try:
+            subprocess.Popen(
+                [
+                    chromium_path,
+                    "--kiosk",
+                    "--force-dark-mode",
+                    "--disable-restore-session-state",
+                    "--disable-infobars",
+                    url,
+                ]
+            )
+            logging.info(f"Launched {chromium_path} in kiosk mode.")
+        except Exception as e:
+            logging.error(f"Failed to launch {chromium_path}: {e}")
+            logging.info("Falling back to default browser.")
+            webbrowser.open(url) # Fallback
+    else:
+        logging.warning("chromium-browser not found in PATH. Opening default browser instead.")
+        webbrowser.open(url) # Fallback if chromium not found
 
 def get_temperature_humidity(mac_address: str):
     """Read temperature, humidity, battery level from a Xiaomi BLE sensor."""
     max_retries = 3
     retry_delay_sec = 2
+    device = None
 
     for attempt in range(max_retries):
         try:
             logging.info(f"Attempt {attempt + 1}/{max_retries} connecting to {mac_address}")
+            # Reset the device variable on each attempt
+            device = None
             # Connect WITHOUT explicit address type
             device = Peripheral(mac_address)
             logging.info(f"Connected to {mac_address}. Reading data...")
@@ -171,24 +221,28 @@ def get_temperature_humidity(mac_address: str):
 
             logging.info("Disconnecting...")
             device.disconnect()
+            device = None
             logging.info(f"Successfully read data and disconnected from {mac_address}.")
             return temp_raw / 100.0, hum, batt / 1000.0
         except Exception as e:
             logging.warning(f"Attempt {attempt + 1} failed for {mac_address}: {e}")
             # Ensure disconnected if connection partially succeeded
-            try:
-                device.disconnect()
-            except Exception:
-                pass # Ignore disconnection errors during retry
+            if device is not None:
+                try:
+                    device.disconnect()
+                except Exception as disconnect_error:
+                    logging.warning(f"Error during disconnect cleanup: {disconnect_error}")
+                device = None
+            
             if attempt < max_retries - 1:
                 logging.info(f"Retrying in {retry_delay_sec} seconds...")
                 time.sleep(retry_delay_sec)
+                # Increase delay for subsequent retries
+                retry_delay_sec *= 2
             else:
                 logging.error(f"Failed to connect to {mac_address} after {max_retries} attempts.")
-                raise # Re-raise the exception to be caught by generate_data_point
+                raise
 
-    # This part should ideally not be reached if retries fail, due to the raise
-    # But as a fallback, raise an error
     raise ConnectionError(f"Could not connect to {mac_address} after retries")
 
 
@@ -251,20 +305,40 @@ def generate_data_point():
 def background_thread():
     """Generate the first datapoint immediately, then repeat every interval."""
     logging.info("Background thread started.")
+    consecutive_failures = 0
+    max_consecutive_failures = 3
+    base_recovery_delay = 60  # 1 minute
+
     try:
         generate_data_point()  # immediate first read
+        consecutive_failures = 0
     except Exception as e:
         logging.error(f"Error during initial data point generation in background thread: {e}")
+        consecutive_failures = 1
 
     while True:
         try:
             generate_data_point()
+            # Reset failure counter on success
+            consecutive_failures = 0
+            time.sleep(MEASUREMENT_INTERVAL_SEC)
         except Exception as e:
-            # Log the error and continue the loop
-            logging.error(f"Error during data point generation in background thread: {e}")
-            # Optional: Add a short delay before retrying the next cycle?
-            # time.sleep(60) # e.g., wait 60 seconds before next attempt
-        time.sleep(MEASUREMENT_INTERVAL_SEC)
+            consecutive_failures += 1
+            logging.error(f"Error during data point generation in background thread (failure #{consecutive_failures}): {e}")
+            
+            # Exponential backoff if we're having repeated failures
+            if consecutive_failures > 1:
+                recovery_delay = base_recovery_delay * (2 ** (consecutive_failures - 1))
+                recovery_delay = min(recovery_delay, 900)  # Cap at 15 minutes
+                logging.warning(f"Multiple consecutive failures detected. Waiting {recovery_delay} seconds before next attempt...")
+                time.sleep(recovery_delay)
+            else:
+                time.sleep(MEASUREMENT_INTERVAL_SEC)
+
+            # If we've had too many consecutive failures, try to log extra debug info
+            if consecutive_failures >= max_consecutive_failures:
+                logging.error("Too many consecutive failures. Consider restarting the application or checking Bluetooth adapter.")
+                # Could add system Bluetooth status check here if needed
 
 thread = Thread(target=background_thread, daemon=True)
 thread.start()
@@ -307,33 +381,58 @@ app.layout = html.Div(
 # ────────────────────────────────────────────────────────────────────────────────
 @app.callback(Output("live-graph", "figure"), [Input("interval", "n_intervals")])
 def update_graph_live(_):
+    """Update the graph with current data."""
+    global data
+    
     if data.empty:
         return blank_fig
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=data["Timestamp"], y=data["Sens1"], mode="lines+markers", name="Poddasze"))
-    fig.add_trace(go.Scatter(x=data["Timestamp"], y=data["Sens2"], mode="lines+markers", name="Kuchnia"))
-    fig.add_trace(go.Scatter(x=data["Timestamp"], y=data["Sens3"], mode="lines+markers", name="Pokój Maksia"))
-    fig.add_trace(go.Scatter(x=data["Timestamp"], y=data["Wroclaw"], mode="lines+markers", name="Wrocław"))
+    try:
+        fig = go.Figure()
+        
+        # Add traces with error handling
+        traces = [
+            ("Sens1", "Poddasze"),
+            ("Sens2", "Kuchnia"),
+            ("Sens3", "Pokój Maksia"),
+            ("Wroclaw", "Wrocław")
+        ]
+        
+        for col, name in traces:
+            if col in data.columns:
+                # Filter out NaN values for this trace
+                trace_data = data[['Timestamp', col]].dropna()
+                if not trace_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=trace_data['Timestamp'],
+                        y=trace_data[col],
+                        mode='lines+markers',
+                        name=name
+                    ))
 
-    fig.update_layout(
-        title="Live Temperature Readings",
-        xaxis_title="Timestamp",
-        yaxis_title="°C",
-        template="plotly_dark",
-        uirevision=True,
-        paper_bgcolor="#000000",
-        plot_bgcolor="#000000",
-        legend=dict(
-            orientation="h",
-            y=-0.25,
-            x=0.5,
-            xanchor="center",
-        ),
-        legend_font_size=18,
-        margin=dict(l=0, r=0, t=0, b=0, pad=0),
-    )
-    return fig
+        # Update layout
+        fig.update_layout(
+            title="Live Temperature Readings",
+            xaxis_title="Timestamp",
+            yaxis_title="°C",
+            template="plotly_dark",
+            uirevision=True,
+            paper_bgcolor="#000000",
+            plot_bgcolor="#000000",
+            legend=dict(
+                orientation="h",
+                y=-0.25,
+                x=0.5,
+                xanchor="center",
+            ),
+            legend_font_size=18,
+            margin=dict(l=0, r=0, t=0, b=0, pad=0),
+        )
+        
+        return fig
+    except Exception as e:
+        logging.error(f"Error updating graph: {e}")
+        return blank_fig
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -342,7 +441,7 @@ def update_graph_live(_):
 if __name__ == "__main__":
     logging.info("Application starting.")
     Timer(1, open_browser).start()
-    app.run_server(
+    app.run(
         debug=False,
         dev_tools_ui=False,
         dev_tools_props_check=False,
