@@ -7,6 +7,8 @@ import logging
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import webbrowser
+import shutil # Import shutil
 
 import dash
 import dash_core_components as dcc
@@ -133,20 +135,31 @@ def get_wroclaw_temperature(api_key: str):
         return None
 
 def open_browser() -> None:
-    """Open Chromium in kiosk mode pointing at the Dash app."""
+    """Find chromium-browser and open it in kiosk mode pointing at the Dash app."""
     url = "http://127.0.0.1:8050/"
-    chromium_path = "/usr/bin/chromium-browser"
-    subprocess.Popen(
-        [
-            chromium_path,
-            "--kiosk",
-            "--force-dark-mode",
-            "--disable-restore-session-state",
-            "--disable-infobars",
-            url,
-        ]
-    )
+    chromium_path = shutil.which('chromium-browser') # Find chromium-browser in PATH
 
+    if chromium_path:
+        logging.info(f"Found chromium-browser at: {chromium_path}")
+        try:
+            subprocess.Popen(
+                [
+                    chromium_path,
+                    "--kiosk",
+                    "--force-dark-mode",
+                    "--disable-restore-session-state",
+                    "--disable-infobars",
+                    url,
+                ]
+            )
+            logging.info(f"Launched {chromium_path} in kiosk mode.")
+        except Exception as e:
+            logging.error(f"Failed to launch {chromium_path}: {e}")
+            logging.info("Falling back to default browser.")
+            webbrowser.open(url) # Fallback
+    else:
+        logging.warning("chromium-browser not found in PATH. Opening default browser instead.")
+        webbrowser.open(url) # Fallback if chromium not found
 
 def get_temperature_humidity(mac_address: str):
     """Read temperature, humidity, battery level from a Xiaomi BLE sensor."""
@@ -342,7 +355,7 @@ def update_graph_live(_):
 if __name__ == "__main__":
     logging.info("Application starting.")
     Timer(1, open_browser).start()
-    app.run_server(
+    app.run(
         debug=False,
         dev_tools_ui=False,
         dev_tools_props_check=False,

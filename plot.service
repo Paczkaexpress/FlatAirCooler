@@ -1,14 +1,14 @@
 [Unit]
-Description=Plot Python Script
+Description=Temperature Plot Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /path/to/your/plot.py
-WorkingDirectory=/path/to/your/script/directory
-StandardOutput=inherit
-StandardError=inherit
+User=paczkaexpress # Make sure this is the correct user
+WorkingDirectory=/home/paczkaexpress/Software/FlatAirCooler
+ExecStart=/bin/bash /home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
 Restart=always
-User=pi
+StandardOutput=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log # Optional: Update log path if needed
+StandardError=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log  # Optional: Update log path if needed
 
 [Install]
-WantedBy=multi-user.target 
+WantedBy=multi-user.target
