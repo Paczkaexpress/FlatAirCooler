@@ -1,66 +1,70 @@
-# BLE Temperature Sensor Dashboard
+# Flat Air Cooler - Temperature Monitor
 
-This Python script reads temperature data from multiple Xiaomi BLE temperature/humidity sensors and current weather data from OpenWeatherMap for a specified location. It displays the collected data in a live-updating web dashboard using Dash and Plotly, and logs all readings to a CSV file.
+This application monitors temperature using Xiaomi BLE sensors and plots the data alongside the current temperature in Wrocław using Dash.
 
-## Features
+## Architecture
 
-*   Connects to multiple specified BLE sensors.
-*   Fetches current external temperature from OpenWeatherMap.
-*   Logs sensor readings and external temperature to `historicalData.csv`.
-*   Displays a live-updating line chart of temperatures via a Dash web interface.
-*   Automatically opens the dashboard in Chromium kiosk mode on startup (Linux).
-*   Includes error handling for BLE connections and web requests.
-*   Logs application events and errors to `app.log`.
+The application is split into two main modules:
 
-## Prerequisites
+*   `backend.py`: Handles all data acquisition (BLE sensor reading via `bluepy`, OpenWeatherMap API fetching), data processing (using `pandas`), saving data to `historicalData.csv`, and manages the background polling thread.
+*   `frontend.py`: Sets up and runs the Dash web application, defines the layout (using `dash_html_components`, `dash_core_components`), creates the plots (using `plotly`), and manages callbacks to update the graph with data fetched from the `DataManager` in `backend.py`. It also handles opening the browser in kiosk mode.
 
-*   Python 3.x
-*   `pip` (Python package installer)
-*   Bluetooth adapter on the machine running the script.
-*   Linux operating system (due to `bluepy` and Chromium path) - `bluepy` might require specific setup:
-    *   `sudo apt-get install python3-pip libglib2.0-dev libbluetooth-dev`
-    *   The user running the script might need permissions to access Bluetooth without `sudo` (e.g., being in the `bluetooth` group).
-*   `chromium-browser` installed at `/usr/bin/chromium-browser` (if using the auto-open feature).
+## Files
 
-## Configuration
-
-Before running, configure the following constants within `plot.py`:
-
-*   `OPENWEATHERMAP_API_KEY`: Your API key from [OpenWeatherMap](https://openweathermap.org/).
-*   `WEATHER_LOCATION`: The location for weather data (e.g., "Wroclaw, PL").
-*   `DEVICES_MACS`: A list of the MAC addresses of your Xiaomi BLE sensors.
-*   `MEASUREMENT_INTERVAL_MIN`: How often (in minutes) to poll the sensors and update the plot.
+*   `frontend.py`: Main application script to run the Dash server and UI.
+*   `backend.py`: Data handling and background processing logic.
+*   `historicalData.csv`: Stores historical temperature readings.
+*   `app.log`: Log file for application events and errors.
+*   `.env`: (Optional/Required) Stores the `OPENWEATHERMAP_API_KEY`.
+*   `requirements.txt`: Lists Python dependencies.
+*   `assets/`: Folder for Dash assets (like custom CSS, if any).
 
 ## Setup
 
-1.  **Clone the repository or download the files.**
-2.  **Navigate to the script directory:**
+1.  **Clone the repository:**
     ```bash
-    cd path/to/Software
+    git clone <your-repo-url>
+    cd <repo-folder>
     ```
-3.  **Create and activate a virtual environment (recommended):**
-    ```bash
-    python3 -m venv .venv
-    source .venv/bin/activate
-    ```
-4.  **Install dependencies:**
+2.  **Install dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
-5.  **Ensure Bluetooth is enabled and necessary permissions are set for `bluepy`.** You might need to run the script with `sudo` the first time or adjust user permissions.
+3.  **Install `bluepy` system dependencies** (if not already installed):
+    ```bash
+    sudo apt-get update
+    sudo apt-get install python3-pip libglib2.0-dev libbluetooth-dev
+    # Install bluepy via pip (should be in requirements.txt too)
+    pip install bluepy
+    ```
+4.  **(Optional/Required) Create `.env` file:**
+    Create a file named `.env` in the root directory and add your OpenWeatherMap API key:
+    ```
+    OPENWEATHERMAP_API_KEY=your_actual_api_key_here
+    ```
+    *Note: If you don't provide an API key, the Wrocław temperature will not be fetched or plotted.*
+
+5.  **Bluetooth Permissions:** Ensure your user has the necessary permissions to interact with Bluetooth devices. You might need to run the script with `sudo` or configure Bluetooth permissions appropriately.
 
 ## Running the Application
 
+Execute the frontend script:
+
 ```bash
-python plot.py
+python frontend.py
+```
+
+Or, if Bluetooth requires root privileges:
+
+```bash
+sudo python frontend.py
 ```
 
 The script will:
-
-1.  Start logging to `app.log`.
-2.  Start the background thread to poll sensors and weather.
-3.  Start the Dash web server (usually on `http://0.0.0.0:8050/`).
-4.  Attempt to open Chromium in kiosk mode pointing to the dashboard.
+1.  Load historical data from `historicalData.csv`.
+2.  Start a background thread to poll sensors and weather data every minute.
+3.  Start the Dash web server on `http://0.0.0.0:8050/`.
+4.  Attempt to open `chromium-browser` in kiosk mode pointing to the app (falling back to the default browser if `chromium-browser` isn't found).
 
 Data will be appended to `historicalData.csv` at each measurement interval.
 
