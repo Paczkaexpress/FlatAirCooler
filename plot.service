@@ -6,7 +6,7 @@ After=network.target
 User=paczkaexpress # Make sure this is the correct user
 WorkingDirectory=/home/paczkaexpress/Software/FlatAirCooler
 ExecStart=/bin/bash /home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
-Restart=always
+Restart=no
 StandardOutput=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log # Optional: Update log path if needed
 StandardError=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log  # Optional: Update log path if needed
 

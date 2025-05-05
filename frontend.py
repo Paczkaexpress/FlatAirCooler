@@ -110,51 +110,93 @@ def update_graph_live(_):
     current_data = data_manager.get_data()
 
     if current_data.empty:
-        logging.info("Update graph: Data is empty, returning blank figure.")
+        # logging.info("Update graph: Data is empty, returning blank figure.") # Keep logging minimal now
         return blank_fig
 
-    logging.info(f"Update graph: Processing {len(current_data)} data points.")
+    # logging.info(f"Update graph: Processing {len(current_data)} data points.") # Keep logging minimal now
     try:
         fig = go.Figure()
 
-        # --- Simplified Plotting ---
-        col = "Sens1"
-        name = "Poddasze"
+        # Define traces, separating Wroclaw for secondary axis
+        sensor_traces = [
+            ("Sens1", "Poddasze"),
+            ("Sens2", "Kuchnia"),
+            ("Sens3", "Pokój Maksia"),
+        ]
+        weather_trace = ("Wroclaw", "Wrocław")
+
+        # Add sensor traces to the primary y-axis
+        for col, name in sensor_traces:
+            if col in current_data.columns:
+                trace_data = current_data[['Timestamp', col]].dropna()
+                if not trace_data.empty:
+                    # logging.info(f"Adding trace for {name} with {len(trace_data)} points.")
+                    fig.add_trace(go.Scatter(
+                        x=trace_data['Timestamp'],
+                        y=trace_data[col],
+                        mode='lines+markers',
+                        name=name,
+                        yaxis='y1' # Explicitly assign to primary axis
+                    ))
+                # else:
+                    # logging.info(f"Trace data for {name} is empty after dropna.")
+            # else:
+                # logging.info(f"Column {col} not found in data.")
+
+        # Add weather trace to the secondary y-axis
+        col, name = weather_trace
         if col in current_data.columns:
             trace_data = current_data[['Timestamp', col]].dropna()
             if not trace_data.empty:
-                logging.info(f"Adding trace for {name} with {len(trace_data)} points.")
                 fig.add_trace(go.Scatter(
                     x=trace_data['Timestamp'],
                     y=trace_data[col],
-                    mode='lines+markers',
-                    name=name
+                    mode='lines', # Maybe lines only for weather?
+                    name=name,
+                    yaxis='y2' # Assign to secondary axis
                 ))
-            else:
-                logging.info(f"Trace data for {name} is empty after dropna.")
-        else:
-            logging.info(f"Column {col} not found in data.")
-        # --- End Simplified Plotting ---
 
-
-        # Update layout (simplified)
+        # Update layout to include the secondary y-axis
         fig.update_layout(
-            title="Live Temperature Readings (Debug)",
+            title="Live Temperature Readings",
             xaxis_title="Timestamp",
-            yaxis=dict(title="°C"),
+            yaxis=dict( # Primary Y-axis (Sensors)
+                title=dict( # Title dictionary
+                    text="°C (Sensors)",
+                    font=dict(color="#1f77b4") # Font settings inside title
+                ),
+                tickfont=dict(color="#1f77b4")
+            ),
+            yaxis2=dict( # Secondary Y-axis (Weather)
+                title=dict( # Title dictionary
+                    text="°C (Wrocław)",
+                    font=dict(color="#ff7f0e") # Font settings inside title
+                ),
+                overlaying="y",
+                side="right",
+                showgrid=False, # Often good to hide grid for secondary axis
+                tickfont=dict(color="#ff7f0e")
+            ),
             template="plotly_dark",
             uirevision=True, # Keep zoom level etc.
             paper_bgcolor="#000000",
             plot_bgcolor="#000000",
-            margin=dict(l=40, r=40, t=40, b=80, pad=0), # Adjusted margins
+            legend=dict(
+                orientation="h",
+                y=-0.25, # Adjust if needed
+                x=0.5,
+                xanchor="center",
+            ),
+            legend_font_size=18,
+            margin=dict(l=40, r=40, t=40, b=80, pad=0), # Adjusted margins for axis titles
         )
 
-        logging.info("Update graph: Successfully created simplified figure.")
+        # logging.info("Update graph: Successfully created figure.")
         return fig
     except Exception as e:
         logging.error(f"Error updating graph: {e}")
         # Log the data that caused the error for inspection
-        logging.error(f"Data causing error:\n{current_data.tail().to_string()}")
+        # logging.error(f"Data causing error:\n{current_data.tail().to_string()}")
         return blank_fig
 
 

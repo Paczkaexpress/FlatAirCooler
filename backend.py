@@ -169,11 +169,11 @@ class DataManager:
                 if attempt < max_retries - 1:
                     logging.info(f"Retrying in {retry_delay_sec} seconds...")
                     time.sleep(retry_delay_sec)
-                    retry_delay_sec *= 2
                 else:
                     logging.error(f"Failed to connect to {mac_address} after {max_retries} attempts.")
                     raise # Re-raise the exception after final retry
 
+        # This should technically not be reachable if max_retries > 0
         raise ConnectionError(f"Could not connect to {mac_address} after retries")
 
 
@@ -194,12 +194,11 @@ class DataManager:
                 logging.warning(f"Failed to read sensor {mac}, recording NaN for this point. Last known value was {self.prev_temp[i]}°C. Error: {e}")
                 temps.append(pd.NA) # Append NA if read fails
 
-        # self.prev_temp = temps.copy() # No longer needed as we update prev_temp individually
+        # self.prev_temp is updated individually on success, no need to copy whole list here
 
         wroclaw_temp = self._get_wroclaw_temperature()
 
         # Ensure temps list has the correct length, padding with NA if necessary
-        # This handles cases where the loop might somehow exit early, though unlikely here.
         while len(temps) < len(DEVICES_MACS):
             temps.append(pd.NA)
 
@@ -234,53 +233,35 @@ class DataManager:
     def _background_loop(self):
         """Generate the first datapoint immediately, then repeat every interval."""
         logging.info("Background thread started.")
-        consecutive_failures = 0
-        max_consecutive_failures = 3
-        base_recovery_delay = 60
 
         # --- Initial data point generation ---
         try:
             self._generate_data_point()
-            consecutive_failures = 0
         except Exception as e:
+            # Log the error, continue to main loop
             logging.error(f"Error during initial data point generation in background thread: {e}")
-            consecutive_failures = 1
 
         # --- Main loop ---
         while self.running:
             start_time = time.monotonic()
             try:
                 self._generate_data_point()
-                consecutive_failures = 0 # Reset failure counter on success
 
                 # Calculate sleep time, ensuring it's non-negative
                 elapsed_time = time.monotonic() - start_time
                 sleep_duration = max(0, MEASUREMENT_INTERVAL_SEC - elapsed_time)
+                logging.debug(f"Data point generated successfully. Sleeping for {sleep_duration:.2f} seconds.")
                 time.sleep(sleep_duration)
 
             except Exception as e:
-                consecutive_failures += 1
-                logging.error(f"Error during data point generation in background thread (failure #{consecutive_failures}): {e}")
+                # Log the error and wait for the normal interval before the next attempt
+                logging.error(f"Error during data point generation in background thread: {e}")
 
-                # Exponential backoff
-                if consecutive_failures > 1:
-                    recovery_delay = base_recovery_delay * (2 ** (consecutive_failures - 1))
-                    recovery_delay = min(recovery_delay, 900)  # Cap at 15 minutes
-                    logging.warning(f"Multiple consecutive failures detected. Waiting {recovery_delay} seconds before next attempt...")
-                    time.sleep(recovery_delay)
-                else:
-                    # Wait standard interval even after first failure before retrying
-                    elapsed_time = time.monotonic() - start_time
-                    sleep_duration = max(0, MEASUREMENT_INTERVAL_SEC - elapsed_time)
-                    time.sleep(sleep_duration)
-
-
-                if consecutive_failures >= max_consecutive_failures:
-                    logging.error("Too many consecutive failures. Consider restarting the application or checking Bluetooth adapter.")
-                    # Optionally stop the thread after too many failures?
-                    # self.stop()
-                    # break # Exit loop
-
+                # Wait standard interval even after failure before retrying
+                elapsed_time = time.monotonic() - start_time
+                sleep_duration = max(0, MEASUREMENT_INTERVAL_SEC - elapsed_time)
+                logging.warning(f"Data generation failed. Waiting {sleep_duration:.2f} seconds before next attempt.")
+                time.sleep(sleep_duration)
 
     def start(self):
         """Start the background data collection thread."""
