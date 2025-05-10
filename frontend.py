@@ -67,28 +67,68 @@ def open_browser() -> None:
         logging.warning("chromium-browser not found in PATH. Opening default browser instead.")
         webbrowser.open(url) # Fallback if chromium not found
 
-# --- Blank Figure --- (Moved from plot.py)
-blank_fig = go.Figure()
-blank_fig.update_layout(
-    paper_bgcolor="#000000",
-    plot_bgcolor="#000000",
-    xaxis_visible=False,
-    yaxis_visible=False,
-    margin=dict(l=0, r=0, t=0, b=0),
-)
+# --- Blank Figure ---
+def create_blank_fig(message: str = "No data available or graph error.") -> go.Figure:
+    """Creates a blank figure with an optional message."""
+    fig = go.Figure()
+    fig.update_layout(
+        paper_bgcolor="#000000",
+        plot_bgcolor="#000000",
+        xaxis_visible=False,
+        yaxis_visible=False,
+        margin=dict(l=0, r=0, t=0, b=0),
+        annotations=[
+            dict(
+                text=message,
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(size=20, color="#ffffff"),
+            )
+        ]
+    )
+    return fig
+
+blank_fig = create_blank_fig() # Default blank figure
 
 # ────────────────────────────────────────────────────────────────────────────────
 # DASH LAYOUT (Moved from plot.py)
 # ────────────────────────────────────────────────────────────────────────────────
+
+# Fetch and validate measurement interval
+DEFAULT_INTERVAL_SEC = 60 # Default to 60 seconds
+measurement_interval_sec = DEFAULT_INTERVAL_SEC
+try:
+    interval_val = data_manager.get_measurement_interval_sec()
+    if isinstance(interval_val, (int, float)) and interval_val > 0:
+        measurement_interval_sec = interval_val
+        logging.info(f"Using measurement interval from DataManager: {measurement_interval_sec}s")
+    else:
+        logging.warning(
+            f"Invalid interval from DataManager ('{interval_val}'). "
+            f"Falling back to default: {DEFAULT_INTERVAL_SEC}s"
+        )
+except Exception as e:
+    logging.error(
+        f"Error getting measurement interval from DataManager: {e}. "
+        f"Falling back to default: {DEFAULT_INTERVAL_SEC}s"
+    )
+
 app.layout = html.Div(
     [
         dcc.Graph(
             id="live-graph",
-            figure=blank_fig,
+            figure=blank_fig, # Use the potentially messaged blank_fig
             style={"height": "100vh", "width": "100vw"},
             config={"displayModeBar": False},
         ),
-        dcc.Interval(id="interval", interval=(data_manager.get_measurement_interval_sec() + 5) * 1000, n_intervals=0),
+        dcc.Interval(
+            id="interval",
+            interval=(measurement_interval_sec + 5) * 1000, # Use validated interval
+            n_intervals=0
+        ),
     ],
     style={
         "backgroundColor": "#121212",
@@ -107,27 +147,27 @@ app.layout = html.Div(
 @app.callback(Output("live-graph", "figure"), [Input("interval", "n_intervals")])
 def update_graph_live(_):
     """Update the graph with current data from DataManager."""
-    current_data = data_manager.get_data()
-
-    if current_data.empty:
-        # logging.info("Update graph: Data is empty, returning blank figure.") # Keep logging minimal now
-        return blank_fig
-
-    # logging.info(f"Update graph: Processing {len(current_data)} data points.") # Keep logging minimal now
     try:
+        current_data = data_manager.get_data()
+
+        if current_data is None or current_data.empty:
+            # logging.info("Update graph: Data is None or empty, returning informative blank figure.")
+            return create_blank_fig("No data currently available from sensors.")
+
+        # logging.info(f"Update graph: Processing {len(current_data)} data points.") # Keep logging minimal now
         fig = go.Figure()
 
         # Define traces, separating Wroclaw for secondary axis
         sensor_traces = [
-            ("Sens1", "Poddasze"),
-            ("Sens2", "Kuchnia"),
-            ("Sens3", "Pokój Maksia"),
+            ("Sens1", "Poddasze", "#1f77b4"),  # Plotly Blue
+            ("Sens2", "Kuchnia", "#ff7f0e"),    # Plotly Orange
+            ("Sens3", "Pokój Maksia", "#d62728"), # Plotly Red
         ]
-        weather_trace = ("Wroclaw", "Wrocław")
+        weather_trace = ("Wroclaw", "Wrocław", "#2ca02c") # Plotly Green
 
         # Add sensor traces to the primary y-axis
-        for col, name in sensor_traces:
-            if col in current_data.columns:
+        for col, name, color in sensor_traces:
+            if col in current_data.columns and not current_data[col].isnull().all():
                 trace_data = current_data[['Timestamp', col]].dropna()
                 if not trace_data.empty:
                     # logging.info(f"Adding trace for {name} with {len(trace_data)} points.")
@@ -136,7 +176,9 @@ def update_graph_live(_):
                         y=trace_data[col],
                         mode='lines+markers',
                         name=name,
-                        yaxis='y1' # Explicitly assign to primary axis
+                        yaxis='y1', # Explicitly assign to primary axis
+                        line=dict(color=color),
+                        marker=dict(color=color)
                     ))
                 # else:
                     # logging.info(f"Trace data for {name} is empty after dropna.")
@@ -144,8 +186,8 @@ def update_graph_live(_):
                 # logging.info(f"Column {col} not found in data.")
 
         # Add weather trace to the secondary y-axis
-        col, name = weather_trace
-        if col in current_data.columns:
+        col, name, color = weather_trace
+        if col in current_data.columns and not current_data[col].isnull().all():
             trace_data = current_data[['Timestamp', col]].dropna()
             if not trace_data.empty:
                 fig.add_trace(go.Scatter(
@@ -153,8 +195,13 @@ def update_graph_live(_):
                     y=trace_data[col],
                     mode='lines', # Maybe lines only for weather?
                     name=name,
-                    yaxis='y2' # Assign to secondary axis
+                    yaxis='y2', # Assign to secondary axis
+                    line=dict(color=color)
                 ))
+
+        if not fig.data: # Check if any traces were actually added
+            # logging.warning("No traces added to the figure, returning informative blank figure.")
+            return create_blank_fig("Data available but could not be plotted. Check sensor configurations.")
 
         # Update layout to include the secondary y-axis
         fig.update_layout(
@@ -170,12 +217,12 @@ def update_graph_live(_):
             yaxis2=dict( # Secondary Y-axis (Weather)
                 title=dict( # Title dictionary
                     text="°C (Wrocław)",
-                    font=dict(color="#ff7f0e") # Font settings inside title
+                    font=dict(color=color) # Use assigned green color
                 ),
                 overlaying="y",
                 side="right",
                 showgrid=False, # Often good to hide grid for secondary axis
-                tickfont=dict(color="#ff7f0e")
+                tickfont=dict(color=color) # Use assigned green color
             ),
             template="plotly_dark",
             uirevision=True, # Keep zoom level etc.
@@ -194,10 +241,8 @@ def update_graph_live(_):
         # logging.info("Update graph: Successfully created figure.")
         return fig
     except Exception as e:
-        logging.error(f"Error updating graph: {e}")
-        # Log the data that caused the error for inspection
-        # logging.error(f"Data causing error:\n{current_data.tail().to_string()}")
-        return blank_fig
+        logging.error(f"Error updating graph: {e}", exc_info=True) # Add exc_info for traceback
+        return create_blank_fig(f"Error generating graph: {type(e).__name__}")
 
 
 # ────────────────────────────────────────────────────────────────────────────────

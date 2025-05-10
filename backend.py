@@ -8,7 +8,7 @@ import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import pandas as pd
-from bluepy.btle import Peripheral, UUID, ADDR_TYPE_RANDOM
+from bluepy.btle import Peripheral, UUID, ADDR_TYPE_RANDOM, BTLEException
 
 # Load environment variables from .env file
 load_dotenv()
@@ -143,8 +143,8 @@ class DataManager:
         for attempt in range(max_retries):
             try:
                 logging.info(f"Attempt {attempt + 1}/{max_retries} connecting to {mac_address}")
-                device = None
-                device = Peripheral(mac_address)
+                device = None # Ensure device is reset for each attempt
+                device = Peripheral(mac_address) # Potentially ADDR_TYPE_RANDOM or ADDR_TYPE_PUBLIC might be needed depending on device
                 logging.info(f"Connected to {mac_address}. Reading data...")
 
                 service = device.getServiceByUUID(SERVICE_UUID)
@@ -154,16 +154,24 @@ class DataManager:
 
                 logging.info("Disconnecting...")
                 device.disconnect()
-                device = None
+                device = None # Clear device after successful disconnect
                 logging.info(f"Successfully read data and disconnected from {mac_address}.")
                 return temp_raw / 100.0, hum, batt / 1000.0
-            except Exception as e:
-                logging.warning(f"Attempt {attempt + 1} failed for {mac_address}: {e}")
+            except BTLEException as e_btle: # More specific BTLE exception
+                logging.warning(f"Attempt {attempt + 1} (BTLEException) failed for {mac_address}: {e_btle}")
                 if device is not None:
                     try:
                         device.disconnect()
                     except Exception as disconnect_error:
-                        logging.warning(f"Error during disconnect cleanup: {disconnect_error}")
+                        logging.warning(f"Error during disconnect cleanup (BTLEException): {disconnect_error}")
+                    device = None
+            except Exception as e: # General exception
+                logging.warning(f"Attempt {attempt + 1} (General Exception) failed for {mac_address}: {e}")
+                if device is not None:
+                    try:
+                        device.disconnect()
+                    except Exception as disconnect_error:
+                        logging.warning(f"Error during disconnect cleanup (General Exception): {disconnect_error}")
                     device = None
 
                 if attempt < max_retries - 1:
