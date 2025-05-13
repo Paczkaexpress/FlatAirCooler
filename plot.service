@@ -1,14 +1,18 @@
 [Unit]
 Description=Temperature Plot Service
-After=network.target
+After=network.target display-manager.service
+Wants=display-manager.service
 
 [Service]
-User=paczkaexpress # Make sure this is the correct user
+User=paczkaexpress
 WorkingDirectory=/home/paczkaexpress/Software/FlatAirCooler
 ExecStart=/bin/bash /home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
-Restart=no
-StandardOutput=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log # Optional: Update log path if needed
-StandardError=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log  # Optional: Update log path if needed
+Restart=always
+RestartSec=60
+StandardOutput=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log
+StandardError=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/paczkaexpress/.Xauthority
 
 [Install]
 WantedBy=multi-user.target
