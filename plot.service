@@ -6,7 +6,7 @@ Wants=display-manager.service
 [Service]
 User=paczkaexpress
 WorkingDirectory=/home/paczkaexpress/Software/FlatAirCooler
-ExecStart=/bin/bash /home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
+ExecStart=/usr/bin/gnome-terminal -- /bin/bash /home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
 Restart=always
 RestartSec=60
 StandardOutput=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log
