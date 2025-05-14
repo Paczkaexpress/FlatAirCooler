@@ -40,6 +40,9 @@ class DataManager:
         self._load_historical_data()
         self.thread = None
         self.running = False
+        self.last_successful_read = datetime.now()
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 5
 
         if not OPENWEATHERMAP_API_KEY:
             logging.warning("OpenWeatherMap API key not found. Weather data will not be fetched.")
@@ -187,55 +190,75 @@ class DataManager:
 
     def _generate_data_point(self):
         """Poll sensors and weather, append the row to disk & in-memory DF."""
-        logging.info("Starting data point generation.")
+        start_time = datetime.now()
+        logging.info("Starting data point generation at %s", start_time.strftime("%Y-%m-%d %H:%M:%S"))
 
-        timestamp = pd.Timestamp.now()
-        temps = [] # Stores temperatures for the *current* data point
+        try:
+            timestamp = pd.Timestamp.now()
+            temps = []  # Stores temperatures for the *current* data point
+            success = True
 
-        for i, mac in enumerate(DEVICES_MACS):
-            try:
-                t, _, _ = self._get_temperature_humidity(mac)
-                logging.info(f"Successfully read sensor {mac}: {t}°C")
-                temps.append(t)
-                self.prev_temp[i] = t # Update previous temp only on success
-            except Exception as e:
-                logging.warning(f"Failed to read sensor {mac}, recording NaN for this point. Last known value was {self.prev_temp[i]}°C. Error: {e}")
-                temps.append(pd.NA) # Append NA if read fails
+            for i, mac in enumerate(DEVICES_MACS):
+                try:
+                    t, h, b = self._get_temperature_humidity(mac)
+                    logging.info(f"Successfully read sensor {mac}: {t}°C, humidity: {h}%, battery: {b}V")
+                    temps.append(t)
+                    self.prev_temp[i] = t  # Update previous temp only on success
+                except Exception as e:
+                    success = False
+                    logging.warning(f"Failed to read sensor {mac}, recording NaN for this point. "
+                                  f"Last known value was {self.prev_temp[i]}°C. Error: {e}")
+                    temps.append(pd.NA)  # Append NA if read fails
 
-        # self.prev_temp is updated individually on success, no need to copy whole list here
+            wroclaw_temp = self._get_wroclaw_temperature()
+            if wroclaw_temp is None:
+                success = False
 
-        wroclaw_temp = self._get_wroclaw_temperature()
+            # Ensure temps list has the correct length, padding with NA if necessary
+            while len(temps) < len(DEVICES_MACS):
+                temps.append(pd.NA)
 
-        # Ensure temps list has the correct length, padding with NA if necessary
-        while len(temps) < len(DEVICES_MACS):
-            temps.append(pd.NA)
-
-        new_row = pd.DataFrame(
-            {
+            new_row = pd.DataFrame({
                 "Timestamp": [timestamp],
                 "Sens1": [temps[0]],
                 "Sens2": [temps[1]],
                 "Sens3": [temps[2]],
                 "Wroclaw": [wroclaw_temp],
-            }
-        )
+            })
 
-        # Ensure the directory exists before writing
-        logging.info(f"Attempting to use CSV file path: '{CSV_FILE}'")
-        try:
-            new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
-            logging.info(f"Successfully appended data to {CSV_FILE}")
+            # Update consecutive failures counter
+            if success:
+                self.consecutive_failures = 0
+                self.last_successful_read = datetime.now()
+            else:
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= self.max_consecutive_failures:
+                    logging.error(f"Hit {self.consecutive_failures} consecutive failures. Triggering thread restart...")
+                    self.stop()
+                    self.start()
+                    return
+
+            # Ensure the directory exists before writing
+            try:
+                new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
+                logging.info(f"Successfully appended data to {CSV_FILE}")
+            except Exception as e:
+                logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
+                success = False
+
+            # Use concat instead of append (append is deprecated)
+            self.data = pd.concat([self.data, new_row], ignore_index=True)
+            if len(self.data) > MAX_DATA_LEN:
+                self.data = self.data.iloc[-MAX_DATA_LEN:]
+
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            logging.info(f"Finished data point generation in {duration:.1f} seconds. Success: {success}")
+            logging.info(f"New row: {new_row.to_dict('records')[0]}")
+
         except Exception as e:
-            logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
-            # Optionally re-raise the exception if you want the main loop's error handling to catch it too
-            # raise
-
-        # Use concat instead of append (append is deprecated)
-        self.data = pd.concat([self.data, new_row], ignore_index=True)
-        if len(self.data) > MAX_DATA_LEN:
-            self.data = self.data.iloc[-MAX_DATA_LEN:]
-
-        logging.info(f"Finished data point generation. New row: {new_row.to_dict('records')[0]}")
+            logging.error(f"Critical error in _generate_data_point: {e}", exc_info=True)
+            self.consecutive_failures += 1
 
 
     def _background_loop(self):
@@ -271,22 +294,53 @@ class DataManager:
                 logging.warning(f"Data generation failed. Waiting {sleep_duration:.2f} seconds before next attempt.")
                 time.sleep(sleep_duration)
 
+    def _check_thread_health(self):
+        """Check if the background thread is healthy and restart if necessary."""
+        if self.thread is None or not self.thread.is_alive():
+            logging.error("Background thread died. Attempting restart...")
+            self.stop()
+            self.start()
+            return
+
+        # Check if we haven't had a successful read in too long
+        time_since_last_read = (datetime.now() - self.last_successful_read).total_seconds()
+        if time_since_last_read > MEASUREMENT_INTERVAL_SEC * 2:
+            logging.error(f"No successful reads in {time_since_last_read:.1f} seconds. Attempting thread restart...")
+            self.stop()
+            self.start()
+
     def start(self):
         """Start the background data collection thread."""
         if not self.running:
             self.running = True
+            self.consecutive_failures = 0
+            self.last_successful_read = datetime.now()
             self.thread = Thread(target=self._background_loop, daemon=True)
             self.thread.start()
             logging.info("Background data collection thread started.")
+            
+            # Start watchdog timer
+            self._start_watchdog()
+
+    def _start_watchdog(self):
+        """Start a watchdog timer to monitor thread health."""
+        if self.running:
+            Timer(MEASUREMENT_INTERVAL_SEC, self._watchdog_check).start()
+
+    def _watchdog_check(self):
+        """Watchdog timer callback to check thread health."""
+        if self.running:
+            self._check_thread_health()
+            self._start_watchdog()  # Schedule next check
 
     def stop(self):
         """Stop the background data collection thread."""
         if self.running:
             self.running = False
             if self.thread:
-                # No join needed for daemon threads, they exit with the main program
-                # self.thread.join() # Optionally join if not daemon
-                pass
+                logging.info("Stopping background data collection thread...")
+                # No join needed for daemon threads
+                self.thread = None
             logging.info("Background data collection thread stopped.")
 
     def get_data(self):

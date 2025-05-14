@@ -3,6 +3,7 @@ import subprocess
 import webbrowser
 import shutil
 from threading import Timer
+from datetime import datetime, timedelta
 
 import dash
 import dash_core_components as dcc
@@ -10,6 +11,7 @@ import dash_html_components as html
 from dash.dependencies import Input, Output
 from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
+import pandas as pd
 
 # Import the backend data manager
 from backend import DataManager
@@ -24,6 +26,13 @@ logging.basicConfig(
     filemode='a' # Append mode
 )
 
+# Add a console handler for immediate feedback
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logging.getLogger('').addHandler(console_handler)
+
 # ────────────────────────────────────────────────────────────────────────────────
 # DATA MANAGER INITIALIZATION
 # ────────────────────────────────────────────────────────────────────────────────
@@ -33,6 +42,11 @@ data_manager = DataManager()
 
 # Start the background data collection
 data_manager.start()
+
+# Track last successful update
+last_successful_update = datetime.now()
+update_failures = 0
+MAX_UPDATE_FAILURES = 3
 
 # ────────────────────────────────────────────────────────────────────────────────
 # DASH APP INITIALISATION
@@ -147,14 +161,36 @@ app.layout = html.Div(
 @app.callback(Output("live-graph", "figure"), [Input("interval", "n_intervals")])
 def update_graph_live(_):
     """Update the graph with current data from DataManager."""
+    global last_successful_update, update_failures
+    
     try:
+        current_time = datetime.now()
+        time_since_last_update = (current_time - last_successful_update).total_seconds()
+        
+        # Check if we're getting updates frequently enough
+        if time_since_last_update > measurement_interval_sec * 2:
+            logging.warning(f"Long delay since last update: {time_since_last_update:.1f} seconds")
+            update_failures += 1
+            if update_failures >= MAX_UPDATE_FAILURES:
+                logging.error("Multiple consecutive update failures. Attempting data manager restart...")
+                data_manager.stop()
+                data_manager.start()
+                update_failures = 0
+        
         current_data = data_manager.get_data()
 
         if current_data is None or current_data.empty:
-            # logging.info("Update graph: Data is None or empty, returning informative blank figure.")
+            logging.warning("Update graph: Data is None or empty, returning informative blank figure.")
             return create_blank_fig("No data currently available from sensors.")
 
-        # logging.info(f"Update graph: Processing {len(current_data)} data points.") # Keep logging minimal now
+        # Check for stale data
+        latest_timestamp = pd.to_datetime(current_data['Timestamp'].max())
+        if latest_timestamp:
+            data_age = (current_time - latest_timestamp.to_pydatetime()).total_seconds()
+            if data_age > measurement_interval_sec * 2:
+                logging.warning(f"Data is stale. Latest point is {data_age:.1f} seconds old")
+                return create_blank_fig(f"Data collection may be stuck. Last update: {latest_timestamp}")
+
         fig = go.Figure()
 
         # Define traces, separating Wroclaw for secondary axis
@@ -170,20 +206,15 @@ def update_graph_live(_):
             if col in current_data.columns and not current_data[col].isnull().all():
                 trace_data = current_data[['Timestamp', col]].dropna()
                 if not trace_data.empty:
-                    # logging.info(f"Adding trace for {name} with {len(trace_data)} points.")
                     fig.add_trace(go.Scatter(
                         x=trace_data['Timestamp'],
                         y=trace_data[col],
                         mode='lines+markers',
                         name=name,
-                        yaxis='y1', # Explicitly assign to primary axis
+                        yaxis='y1',
                         line=dict(color=color),
                         marker=dict(color=color)
                     ))
-                # else:
-                    # logging.info(f"Trace data for {name} is empty after dropna.")
-            # else:
-                # logging.info(f"Column {col} not found in data.")
 
         # Add weather trace to the secondary y-axis
         col, name, color = weather_trace
@@ -193,55 +224,63 @@ def update_graph_live(_):
                 fig.add_trace(go.Scatter(
                     x=trace_data['Timestamp'],
                     y=trace_data[col],
-                    mode='lines', # Maybe lines only for weather?
+                    mode='lines',
                     name=name,
-                    yaxis='y2', # Assign to secondary axis
+                    yaxis='y2',
                     line=dict(color=color)
                 ))
 
-        if not fig.data: # Check if any traces were actually added
-            # logging.warning("No traces added to the figure, returning informative blank figure.")
+        if not fig.data:
+            logging.warning("No traces added to the figure, returning informative blank figure.")
             return create_blank_fig("Data available but could not be plotted. Check sensor configurations.")
 
-        # Update layout to include the secondary y-axis
+        # Update layout
         fig.update_layout(
-            title="Live Temperature Readings",
+            title=dict(
+                text=f"Live Temperature Readings (Last Update: {current_time.strftime('%H:%M:%S')})",
+                x=0.5,
+                xanchor="center"
+            ),
             xaxis_title="Timestamp",
-            yaxis=dict( # Primary Y-axis (Sensors)
-                title=dict( # Title dictionary
+            yaxis=dict(
+                title=dict(
                     text="°C (Sensors)",
-                    font=dict(color="#1f77b4") # Font settings inside title
+                    font=dict(color="#1f77b4")
                 ),
                 tickfont=dict(color="#1f77b4")
             ),
-            yaxis2=dict( # Secondary Y-axis (Weather)
-                title=dict( # Title dictionary
+            yaxis2=dict(
+                title=dict(
                     text="°C (Wrocław)",
-                    font=dict(color=color) # Use assigned green color
+                    font=dict(color=color)
                 ),
                 overlaying="y",
                 side="right",
-                showgrid=False, # Often good to hide grid for secondary axis
-                tickfont=dict(color=color) # Use assigned green color
+                showgrid=False,
+                tickfont=dict(color=color)
             ),
             template="plotly_dark",
-            uirevision=True, # Keep zoom level etc.
+            uirevision=True,
             paper_bgcolor="#000000",
             plot_bgcolor="#000000",
             legend=dict(
                 orientation="h",
-                y=-0.25, # Adjust if needed
+                y=-0.25,
                 x=0.5,
                 xanchor="center",
             ),
             legend_font_size=18,
-            margin=dict(l=40, r=40, t=40, b=80, pad=0), # Adjusted margins for axis titles
+            margin=dict(l=40, r=40, t=40, b=80, pad=0),
         )
 
-        # logging.info("Update graph: Successfully created figure.")
+        # Update success tracking
+        last_successful_update = current_time
+        update_failures = 0
+        
         return fig
     except Exception as e:
-        logging.error(f"Error updating graph: {e}", exc_info=True) # Add exc_info for traceback
+        logging.error(f"Error updating graph: {e}", exc_info=True)
+        update_failures += 1
         return create_blank_fig(f"Error generating graph: {type(e).__name__}")
 
 
