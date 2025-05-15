@@ -189,76 +189,99 @@ class DataManager:
 
 
     def _generate_data_point(self):
-        """Poll sensors and weather, append the row to disk & in-memory DF."""
+        """Poll sensors and weather, append the row to disk & in-memory DF.
+        
+        Returns:
+            bool: True if all measurements succeeded, False otherwise
+        """
         start_time = datetime.now()
         logging.info("Starting data point generation at %s", start_time.strftime("%Y-%m-%d %H:%M:%S"))
 
         try:
             timestamp = pd.Timestamp.now()
-            temps = []  # Stores temperatures for the *current* data point
-            success = True
+            temps = []  # Initialize empty temperature list
+            all_success = True
 
+            # Read each sensor with retries
             for i, mac in enumerate(DEVICES_MACS):
+                retries = 3
+                sensor_success = False
+                
+                # Only retry if the sensor read fails
+                while retries > 0 and not sensor_success:
+                    try:
+                        t, h, b = self._get_temperature_humidity(mac)
+                        logging.info(f"Successfully read sensor {mac}: {t}°C, humidity: {h}%, battery: {b}V")
+                        temps.append(t)
+                        self.prev_temp[i] = t  # Update previous temp on success
+                        sensor_success = True
+                    except Exception as e:
+                        retries -= 1
+                        if retries > 0:
+                            logging.warning(f"Failed to read sensor {mac}, attempts remaining: {retries}. Error: {e}")
+                            time.sleep(2)  # Wait before retry
+                        else:
+                            logging.error(f"Failed to read sensor {mac} after all retries. Error: {e}")
+                            temps.append(pd.NA)
+                            all_success = False
+
+            # Get weather data with retries
+            weather_retries = 3
+            wroclaw_temp = None
+            
+            while weather_retries > 0 and wroclaw_temp is None:
+                wroclaw_temp = self._get_wroclaw_temperature()
+                if wroclaw_temp is None:
+                    weather_retries -= 1
+                    if weather_retries > 0:
+                        logging.warning(f"Failed to get weather data, attempts remaining: {weather_retries}")
+                        time.sleep(2)  # Wait before retry
+                    else:
+                        logging.error("Failed to get weather data after all retries")
+                        all_success = False
+
+            # Only proceed with data storage if all measurements succeeded
+            if all_success:
+                new_row = pd.DataFrame({
+                    "Timestamp": [timestamp],
+                    "Sens1": [temps[0]],
+                    "Sens2": [temps[1]],
+                    "Sens3": [temps[2]],
+                    "Wroclaw": [wroclaw_temp],
+                })
+
+                # Write to CSV and update in-memory DataFrame
                 try:
-                    t, h, b = self._get_temperature_humidity(mac)
-                    logging.info(f"Successfully read sensor {mac}: {t}°C, humidity: {h}%, battery: {b}V")
-                    temps.append(t)
-                    self.prev_temp[i] = t  # Update previous temp only on success
+                    new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
+                    logging.info(f"Successfully appended data to {CSV_FILE}")
+                    
+                    # Update in-memory DataFrame
+                    self.data = pd.concat([self.data, new_row], ignore_index=True)
+                    if len(self.data) > MAX_DATA_LEN:
+                        self.data = self.data.iloc[-MAX_DATA_LEN:]
+                        
+                    self.consecutive_failures = 0
+                    self.last_successful_read = datetime.now()
                 except Exception as e:
-                    success = False
-                    logging.warning(f"Failed to read sensor {mac}, recording NaN for this point. "
-                                  f"Last known value was {self.prev_temp[i]}°C. Error: {e}")
-                    temps.append(pd.NA)  # Append NA if read fails
-
-            wroclaw_temp = self._get_wroclaw_temperature()
-            if wroclaw_temp is None:
-                success = False
-
-            # Ensure temps list has the correct length, padding with NA if necessary
-            while len(temps) < len(DEVICES_MACS):
-                temps.append(pd.NA)
-
-            new_row = pd.DataFrame({
-                "Timestamp": [timestamp],
-                "Sens1": [temps[0]],
-                "Sens2": [temps[1]],
-                "Sens3": [temps[2]],
-                "Wroclaw": [wroclaw_temp],
-            })
-
-            # Update consecutive failures counter
-            if success:
-                self.consecutive_failures = 0
-                self.last_successful_read = datetime.now()
+                    logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
+                    all_success = False
             else:
                 self.consecutive_failures += 1
                 if self.consecutive_failures >= self.max_consecutive_failures:
                     logging.error(f"Hit {self.consecutive_failures} consecutive failures. Triggering thread restart...")
                     self.stop()
                     self.start()
-                    return
-
-            # Ensure the directory exists before writing
-            try:
-                new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
-                logging.info(f"Successfully appended data to {CSV_FILE}")
-            except Exception as e:
-                logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
-                success = False
-
-            # Use concat instead of append (append is deprecated)
-            self.data = pd.concat([self.data, new_row], ignore_index=True)
-            if len(self.data) > MAX_DATA_LEN:
-                self.data = self.data.iloc[-MAX_DATA_LEN:]
 
             end_time = datetime.now()
             duration = (end_time - start_time).total_seconds()
-            logging.info(f"Finished data point generation in {duration:.1f} seconds. Success: {success}")
-            logging.info(f"New row: {new_row.to_dict('records')[0]}")
+            logging.info(f"Finished data point generation in {duration:.1f} seconds. Success: {all_success}")
+            
+            return all_success
 
         except Exception as e:
             logging.error(f"Critical error in _generate_data_point: {e}", exc_info=True)
             self.consecutive_failures += 1
+            return False
 
 
     def _background_loop(self):
