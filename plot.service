@@ -8,6 +8,7 @@ Type=simple
 User=paczkaexpress
 Group=paczkaexpress
 WorkingDirectory=/home/paczkaexpress/Software/FlatAirCooler
+ExecStartPre=/bin/bash -c 'while ! pgrep -x "Xorg|X" > /dev/null; do sleep 1; done'
 ExecStart=/home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
 Restart=always
 RestartSec=30
@@ -18,6 +19,7 @@ StandardError=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/paczkaexpress/.Xauthority
 Environment=HOME=/home/paczkaexpress
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30

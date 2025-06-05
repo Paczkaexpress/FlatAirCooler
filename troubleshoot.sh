@@ -9,17 +9,34 @@ SERVICE_NAME="plot.service"
 # Function to check service status
 check_service_status() {
     echo "--- Service Status ---"
-    if systemctl is-active --quiet "$SERVICE_NAME"; then
-        echo "✓ Service is RUNNING"
+    
+    # Check system service
+    if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        echo "✓ System service is RUNNING"
     else
-        echo "✗ Service is NOT RUNNING"
+        echo "✗ System service is NOT RUNNING"
     fi
     
-    if systemctl is-enabled --quiet "$SERVICE_NAME"; then
-        echo "✓ Service is ENABLED (will start at boot)"
+    if systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+        echo "✓ System service is ENABLED (will start at boot)"
     else
-        echo "✗ Service is DISABLED (will not start at boot)"
+        echo "✗ System service is DISABLED (will not start at boot)"
     fi
+    
+    # Check user service
+    USER_SERVICE="plot-user.service"
+    if systemctl --user is-active --quiet "$USER_SERVICE" 2>/dev/null; then
+        echo "✓ User service is RUNNING"
+    else
+        echo "✗ User service is NOT RUNNING"
+    fi
+    
+    if systemctl --user is-enabled --quiet "$USER_SERVICE" 2>/dev/null; then
+        echo "✓ User service is ENABLED (will start at login)"
+    else
+        echo "✗ User service is DISABLED (will not start at login)"
+    fi
+    
     echo ""
 }
 
@@ -113,7 +130,11 @@ show_logs() {
     echo ""
     
     echo "--- Recent Service Logs (last 10 lines) ---"
-    sudo journalctl -u "$SERVICE_NAME" --no-pager -n 10 2>/dev/null || echo "Cannot access service logs"
+    echo "System service logs:"
+    sudo journalctl -u "$SERVICE_NAME" --no-pager -n 5 2>/dev/null || echo "Cannot access system service logs"
+    echo ""
+    echo "User service logs:"
+    journalctl --user -u "plot-user.service" --no-pager -n 5 2>/dev/null || echo "Cannot access user service logs"
     echo ""
 }
 
