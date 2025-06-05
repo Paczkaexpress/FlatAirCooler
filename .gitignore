@@ -29,7 +29,9 @@ Thumbs.db
 
 # Environment variables
 .env
+.wenv
 .env.*
+.wenv.*
 
 # Jupyter Notebook
 .ipynb_checkpoints

@@ -2,12 +2,13 @@ import logging
 import subprocess
 import webbrowser
 import shutil
+import psutil
+import time
 from threading import Timer
 from datetime import datetime, timedelta
 
 import dash
-import dash_core_components as dcc
-import dash_html_components as html
+from dash import dcc, html
 from dash.dependencies import Input, Output
 from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
@@ -53,33 +54,101 @@ MAX_UPDATE_FAILURES = 3
 # ────────────────────────────────────────────────────────────────────────────────
 app = dash.Dash(__name__, assets_folder='assets')
 
-# --- Helper for Browser --- (Moved from plot.py)
+# --- Browser Management --- (Improved from plot.py)
+chromium_process = None
+chromium_restart_count = 0
+MAX_CHROMIUM_RESTARTS = 5
+
+def is_chromium_running():
+    """Check if chromium is still running with our specific parameters."""
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if proc.info['name'] and 'chromium' in proc.info['name'].lower():
+                cmdline = ' '.join(proc.info['cmdline'] or [])
+                if '--kiosk' in cmdline and '8050' in cmdline:
+                    return True
+        return False
+    except Exception as e:
+        logging.warning(f"Error checking chromium status: {e}")
+        return False
+
+def kill_chromium_processes():
+    """Kill any existing chromium processes running our app."""
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            if proc.info['name'] and 'chromium' in proc.info['name'].lower():
+                cmdline = ' '.join(proc.info['cmdline'] or [])
+                if '--kiosk' in cmdline and '8050' in cmdline:
+                    logging.info(f"Terminating chromium process PID {proc.info['pid']}")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except psutil.TimeoutExpired:
+                        proc.kill()
+    except Exception as e:
+        logging.warning(f"Error killing chromium processes: {e}")
+
 def open_browser() -> None:
     """Find chromium-browser and open it in kiosk mode pointing at the Dash app."""
+    global chromium_process, chromium_restart_count
+    
+    if chromium_restart_count >= MAX_CHROMIUM_RESTARTS:
+        logging.error(f"Maximum chromium restart attempts ({MAX_CHROMIUM_RESTARTS}) reached. Not restarting.")
+        return
+    
     url = "http://127.0.0.1:8050/"
-    chromium_path = shutil.which('chromium-browser') # Find chromium-browser in PATH
+    chromium_path = shutil.which('chromium-browser')
+
+    # Kill any existing chromium processes first
+    kill_chromium_processes()
+    time.sleep(2)
 
     if chromium_path:
         logging.info(f"Found chromium-browser at: {chromium_path}")
         try:
-            subprocess.Popen(
+            chromium_process = subprocess.Popen(
                 [
                     chromium_path,
                     "--kiosk",
                     "--force-dark-mode",
                     "--disable-restore-session-state",
                     "--disable-infobars",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-gpu-sandbox",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor",
+                    "--start-fullscreen",
+                    "--window-position=0,0",
                     url,
-                ]
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
-            logging.info(f"Launched {chromium_path} in kiosk mode.")
+            chromium_restart_count += 1
+            logging.info(f"Launched chromium in kiosk mode (PID: {chromium_process.pid}, restart #{chromium_restart_count})")
+            
+            # Start monitoring chromium
+            Timer(10, monitor_chromium).start()
+            
         except Exception as e:
             logging.error(f"Failed to launch {chromium_path}: {e}")
             logging.info("Falling back to default browser.")
-            webbrowser.open(url) # Fallback
+            webbrowser.open(url)
     else:
         logging.warning("chromium-browser not found in PATH. Opening default browser instead.")
-        webbrowser.open(url) # Fallback if chromium not found
+        webbrowser.open(url)
+
+def monitor_chromium():
+    """Monitor chromium process and restart if needed."""
+    global chromium_process
+    
+    if not is_chromium_running():
+        logging.warning("Chromium process died, attempting restart")
+        open_browser()
+    else:
+        # Schedule next check
+        Timer(30, monitor_chromium).start()
 
 # --- Blank Figure ---
 def create_blank_fig(message: str = "No data available or graph error.") -> go.Figure:
@@ -184,12 +253,16 @@ def update_graph_live(_):
             return create_blank_fig("No data currently available from sensors.")
 
         # Check for stale data
-        latest_timestamp = pd.to_datetime(current_data['Timestamp'].max())
-        if latest_timestamp:
-            data_age = (current_time - latest_timestamp.to_pydatetime()).total_seconds()
-            if data_age > measurement_interval_sec * 2:
-                logging.warning(f"Data is stale. Latest point is {data_age:.1f} seconds old")
-                return create_blank_fig(f"Data collection may be stuck. Last update: {latest_timestamp}")
+        try:
+            latest_timestamp = pd.to_datetime(current_data['Timestamp'].max())
+            if latest_timestamp and not pd.isna(latest_timestamp):
+                data_age = (current_time - latest_timestamp.to_pydatetime()).total_seconds()
+                if data_age > measurement_interval_sec * 2:
+                    logging.warning(f"Data is stale. Latest point is {data_age:.1f} seconds old")
+                    return create_blank_fig(f"Data collection may be stuck. Last update: {latest_timestamp}")
+        except Exception as e:
+            logging.warning(f"Error checking data age: {e}")
+            # Continue with plotting anyway
 
         fig = go.Figure()
 

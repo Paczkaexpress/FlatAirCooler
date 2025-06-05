@@ -1,18 +1,26 @@
 [Unit]
 Description=Temperature Plot Service
-After=network.target display-manager.service
-Wants=display-manager.service
+After=graphical-session.target network.target
+Wants=graphical-session.target
 
 [Service]
+Type=simple
 User=paczkaexpress
+Group=paczkaexpress
 WorkingDirectory=/home/paczkaexpress/Software/FlatAirCooler
-ExecStart=/usr/bin/gnome-terminal -- /bin/bash /home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
+ExecStart=/home/paczkaexpress/Software/FlatAirCooler/run_temp.sh
 Restart=always
-RestartSec=60
+RestartSec=30
+StartLimitBurst=5
+StartLimitIntervalSec=300
 StandardOutput=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log
 StandardError=file:/home/paczkaexpress/Software/FlatAirCooler/dash_app.log
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/paczkaexpress/.Xauthority
+Environment=HOME=/home/paczkaexpress
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical-session.target

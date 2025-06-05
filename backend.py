@@ -240,31 +240,44 @@ class DataManager:
                         logging.error("Failed to get weather data after all retries")
                         all_success = False
 
-            # Only proceed with data storage if all measurements succeeded
-            if all_success:
-                new_row = pd.DataFrame({
-                    "Timestamp": [timestamp],
-                    "Sens1": [temps[0]],
-                    "Sens2": [temps[1]],
-                    "Sens3": [temps[2]],
-                    "Wroclaw": [wroclaw_temp],
-                })
+                            # Proceed with data storage (even with partial failures to maintain consistency)
+            new_row = pd.DataFrame({
+                "Timestamp": [timestamp],
+                "Sens1": [temps[0] if len(temps) > 0 else pd.NA],
+                "Sens2": [temps[1] if len(temps) > 1 else pd.NA],
+                "Sens3": [temps[2] if len(temps) > 2 else pd.NA],
+                "Wroclaw": [wroclaw_temp],
+            })
 
-                # Write to CSV and update in-memory DataFrame
-                try:
-                    new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
-                    logging.info(f"Successfully appended data to {CSV_FILE}")
+            # Write to CSV and update in-memory DataFrame
+            try:
+                new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
+                logging.info(f"Successfully appended data to {CSV_FILE}")
+                
+                # Update in-memory DataFrame - fix FutureWarning by ensuring consistent data types
+                if not new_row.isna().all().all():  # Only add if not all values are NaN
+                    # Ensure data types are consistent
+                    for col in new_row.columns:
+                        if col == 'Timestamp':
+                            continue
+                        new_row[col] = pd.to_numeric(new_row[col], errors='coerce')
                     
-                    # Update in-memory DataFrame
+                    # Ensure self.data has all required columns
+                    for col in ["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"]:
+                        if col not in self.data.columns:
+                            self.data[col] = pd.NA
+                    
                     self.data = pd.concat([self.data, new_row], ignore_index=True)
                     if len(self.data) > MAX_DATA_LEN:
                         self.data = self.data.iloc[-MAX_DATA_LEN:]
-                        
-                    self.consecutive_failures = 0
-                    self.last_successful_read = datetime.now()
-                except Exception as e:
-                    logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
-                    all_success = False
+                    
+                    if all_success:
+                        self.consecutive_failures = 0
+                        self.last_successful_read = datetime.now()
+                
+            except Exception as e:
+                logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
+                all_success = False
             else:
                 self.consecutive_failures += 1
                 if self.consecutive_failures >= self.max_consecutive_failures:
