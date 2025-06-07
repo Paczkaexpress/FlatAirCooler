@@ -11,6 +11,8 @@ RestartSec=30
 StandardOutput=file:%h/Software/FlatAirCooler/dash_app.log
 StandardError=file:%h/Software/FlatAirCooler/dash_app.log
 Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+Environment=HOME=%h
 
 [Install]
 WantedBy=default.target 
