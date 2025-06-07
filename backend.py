@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import pandas as pd
 from bluepy.btle import Peripheral, UUID, ADDR_TYPE_RANDOM, BTLEException
+from collections import deque
 
 # Load environment variables from .env file
 load_dotenv()
@@ -31,10 +32,13 @@ CSV_FILE = "historicalData.csv"
 MAX_DATA_LEN = 500
 MEASUREMENT_INTERVAL_MIN = 1
 MEASUREMENT_INTERVAL_SEC = MEASUREMENT_INTERVAL_MIN * 60
+MIN_SLEEP_SEC = 5  # Minimum sleep time to prevent busy-loop
 
 
 class DataManager:
     def __init__(self):
+        # Use deque instead of pandas for memory efficiency
+        self.recent_data = deque(maxlen=MAX_DATA_LEN)
         self.data = pd.DataFrame(columns=["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"])
         self.prev_temp = [22.0] * len(DEVICES_MACS)
         self._load_historical_data()
@@ -43,10 +47,16 @@ class DataManager:
         self.last_successful_read = datetime.now()
         self.consecutive_failures = 0
         self.max_consecutive_failures = 5
+        
+        # BLE connection management
+        self.ble_connections = {}  # Store persistent connections
+        self.connection_retry_count = {}  # Track retry attempts per device
+        
+        # Timer management to fix thread leak
+        self.watchdog_timer = None
 
         if not OPENWEATHERMAP_API_KEY:
             logging.warning("OpenWeatherMap API key not found. Weather data will not be fetched.")
-
 
     def _load_historical_data(self):
         """Load and process historical data from CSV file."""
@@ -89,16 +99,28 @@ class DataManager:
 
                 if len(recent_data) > MAX_DATA_LEN:
                     logging.info(f"Truncating to {MAX_DATA_LEN} most recent entries")
-                    self.data = recent_data.tail(MAX_DATA_LEN)
-                else:
-                    self.data = recent_data
+                    recent_data = recent_data.tail(MAX_DATA_LEN)
 
-                logging.info(f"Successfully loaded {len(self.data)} rows of historical data")
+                # Populate deque with recent data for memory efficiency
+                for _, row in recent_data.iterrows():
+                    data_point = {
+                        "Timestamp": row['Timestamp'],
+                        "Sens1": row['Sens1'] if pd.notna(row['Sens1']) else None,
+                        "Sens2": row['Sens2'] if pd.notna(row['Sens2']) else None,
+                        "Sens3": row['Sens3'] if pd.notna(row['Sens3']) else None,
+                        "Wroclaw": row['Wroclaw'] if pd.notna(row['Wroclaw']) else None,
+                    }
+                    self.recent_data.append(data_point)
 
-                if self.data['Timestamp'].isna().any():
+                # Keep DataFrame for compatibility with any remaining code
+                self.data = recent_data
+
+                logging.info(f"Successfully loaded {len(self.recent_data)} rows of historical data")
+
+                if recent_data['Timestamp'].isna().any():
                     logging.warning("Found NaN timestamps in loaded data")
                 for col in numeric_columns:
-                    nan_count = self.data[col].isna().sum()
+                    nan_count = recent_data[col].isna().sum()
                     if nan_count > 0:
                         logging.warning(f"Found {nan_count} NaN values in {col}")
 
@@ -137,56 +159,85 @@ class DataManager:
             logging.error(f"An unexpected error occurred fetching weather: {e}")
             return None
 
-    def _get_temperature_humidity(self, mac_address: str):
-        """Read temperature, humidity, battery level from a Xiaomi BLE sensor."""
-        max_retries = 3
-        retry_delay_sec = 2
-        device = None
+    def _connect_to_device(self, mac_address: str):
+        """Establish and maintain a persistent connection to a BLE device."""
+        try:
+            if mac_address in self.ble_connections:
+                # Test existing connection
+                try:
+                    # Quick test - if this fails, connection is dead
+                    self.ble_connections[mac_address].getServices()
+                    return self.ble_connections[mac_address]
+                except:
+                    # Connection is dead, clean it up
+                    try:
+                        self.ble_connections[mac_address].disconnect()
+                    except:
+                        pass
+                    del self.ble_connections[mac_address]
+            
+            # Create new connection
+            logging.info(f"Establishing persistent connection to {mac_address}")
+            device = Peripheral(mac_address)
+            self.ble_connections[mac_address] = device
+            self.connection_retry_count[mac_address] = 0
+            logging.info(f"Successfully connected to {mac_address}")
+            return device
+            
+        except Exception as e:
+            self.connection_retry_count[mac_address] = self.connection_retry_count.get(mac_address, 0) + 1
+            logging.error(f"Failed to connect to {mac_address}: {e}")
+            if mac_address in self.ble_connections:
+                del self.ble_connections[mac_address]
+            return None
 
-        for attempt in range(max_retries):
+    def _disconnect_all_devices(self):
+        """Clean up all BLE connections."""
+        for mac_address, device in self.ble_connections.items():
             try:
-                logging.info(f"Attempt {attempt + 1}/{max_retries} connecting to {mac_address}")
-                device = None # Ensure device is reset for each attempt
-                device = Peripheral(mac_address) # Potentially ADDR_TYPE_RANDOM or ADDR_TYPE_PUBLIC might be needed depending on device
-                logging.info(f"Connected to {mac_address}. Reading data...")
+                device.disconnect()
+                logging.info(f"Disconnected from {mac_address}")
+            except Exception as e:
+                logging.warning(f"Error disconnecting from {mac_address}: {e}")
+        self.ble_connections.clear()
+        self.connection_retry_count.clear()
 
+    def _get_temperature_humidity(self, mac_address: str):
+        """Read temperature, humidity, battery level from a Xiaomi BLE sensor using persistent connection."""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            device = self._connect_to_device(mac_address)
+            if device is None:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                raise ConnectionError(f"Could not connect to {mac_address} after {max_retries} attempts")
+            
+            try:
+                logging.info(f"Reading from {mac_address} (attempt {attempt + 1}/{max_retries})")
                 service = device.getServiceByUUID(SERVICE_UUID)
                 characteristic = service.getCharacteristics(CHARACTERISTIC_UUID)[0]
                 raw = characteristic.read()
                 temp_raw, hum, batt = struct.unpack("<HbH", raw)
-
-                logging.info("Disconnecting...")
-                device.disconnect()
-                device = None # Clear device after successful disconnect
-                logging.info(f"Successfully read data and disconnected from {mac_address}.")
+                
+                logging.info(f"Successfully read data from {mac_address}")
                 return temp_raw / 100.0, hum, batt / 1000.0
-            except BTLEException as e_btle: # More specific BTLE exception
-                logging.warning(f"Attempt {attempt + 1} (BTLEException) failed for {mac_address}: {e_btle}")
-                if device is not None:
+                
+            except Exception as e:
+                logging.warning(f"Attempt {attempt + 1} failed for {mac_address}: {e}")
+                # Remove failed connection
+                if mac_address in self.ble_connections:
                     try:
-                        device.disconnect()
-                    except Exception as disconnect_error:
-                        logging.warning(f"Error during disconnect cleanup (BTLEException): {disconnect_error}")
-                    device = None
-            except Exception as e: # General exception
-                logging.warning(f"Attempt {attempt + 1} (General Exception) failed for {mac_address}: {e}")
-                if device is not None:
-                    try:
-                        device.disconnect()
-                    except Exception as disconnect_error:
-                        logging.warning(f"Error during disconnect cleanup (General Exception): {disconnect_error}")
-                    device = None
-
+                        self.ble_connections[mac_address].disconnect()
+                    except:
+                        pass
+                    del self.ble_connections[mac_address]
+                
                 if attempt < max_retries - 1:
-                    logging.info(f"Retrying in {retry_delay_sec} seconds...")
-                    time.sleep(retry_delay_sec)
+                    time.sleep(2)
                 else:
-                    logging.error(f"Failed to connect to {mac_address} after {max_retries} attempts.")
-                    raise # Re-raise the exception after final retry
-
-        # This should technically not be reachable if max_retries > 0
-        raise ConnectionError(f"Could not connect to {mac_address} after retries")
-
+                    raise ConnectionError(f"Failed to read from {mac_address} after {max_retries} attempts")
 
     def _generate_data_point(self):
         """Poll sensors and weather, append the row to disk & in-memory DF.
@@ -241,44 +292,36 @@ class DataManager:
                         all_success = False
 
                             # Proceed with data storage (even with partial failures to maintain consistency)
-            new_row = pd.DataFrame({
-                "Timestamp": [timestamp],
-                "Sens1": [temps[0] if len(temps) > 0 else pd.NA],
-                "Sens2": [temps[1] if len(temps) > 1 else pd.NA],
-                "Sens3": [temps[2] if len(temps) > 2 else pd.NA],
-                "Wroclaw": [wroclaw_temp],
-            })
+            data_point = {
+                "Timestamp": timestamp,
+                "Sens1": temps[0] if len(temps) > 0 else None,
+                "Sens2": temps[1] if len(temps) > 1 else None,
+                "Sens3": temps[2] if len(temps) > 2 else None,
+                "Wroclaw": wroclaw_temp,
+            }
 
-            # Write to CSV and update in-memory DataFrame
+            # Write to CSV - create DataFrame only for CSV writing
             try:
+                new_row = pd.DataFrame([data_point])
                 new_row.to_csv(CSV_FILE, mode="a", index=False, header=not os.path.exists(CSV_FILE))
                 logging.info(f"Successfully appended data to {CSV_FILE}")
                 
-                # Update in-memory DataFrame - fix FutureWarning by ensuring consistent data types
-                if not new_row.isna().all().all():  # Only add if not all values are NaN
-                    # Ensure data types are consistent
-                    for col in new_row.columns:
-                        if col == 'Timestamp':
-                            continue
-                        new_row[col] = pd.to_numeric(new_row[col], errors='coerce')
-                    
-                    # Ensure self.data has all required columns
-                    for col in ["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"]:
-                        if col not in self.data.columns:
-                            self.data[col] = pd.NA
-                    
-                    self.data = pd.concat([self.data, new_row], ignore_index=True)
-                    if len(self.data) > MAX_DATA_LEN:
-                        self.data = self.data.iloc[-MAX_DATA_LEN:]
-                    
-                    if all_success:
-                        self.consecutive_failures = 0
-                        self.last_successful_read = datetime.now()
+                # Store in memory-efficient deque
+                self.recent_data.append(data_point)
+                
+                if all_success:
+                    self.consecutive_failures = 0
+                    self.last_successful_read = datetime.now()
+                else:
+                    self.consecutive_failures += 1
+                    if self.consecutive_failures >= self.max_consecutive_failures:
+                        logging.error(f"Hit {self.consecutive_failures} consecutive failures. Triggering thread restart...")
+                        self.stop()
+                        self.start()
                 
             except Exception as e:
                 logging.error(f"Failed to write to CSV file '{CSV_FILE}': {e}")
                 all_success = False
-            else:
                 self.consecutive_failures += 1
                 if self.consecutive_failures >= self.max_consecutive_failures:
                     logging.error(f"Hit {self.consecutive_failures} consecutive failures. Triggering thread restart...")
@@ -314,9 +357,9 @@ class DataManager:
             try:
                 self._generate_data_point()
 
-                # Calculate sleep time, ensuring it's non-negative
+                # Calculate sleep time with minimum sleep to prevent busy-loop
                 elapsed_time = time.monotonic() - start_time
-                sleep_duration = max(0, MEASUREMENT_INTERVAL_SEC - elapsed_time)
+                sleep_duration = max(MIN_SLEEP_SEC, MEASUREMENT_INTERVAL_SEC - elapsed_time)
                 logging.debug(f"Data point generated successfully. Sleeping for {sleep_duration:.2f} seconds.")
                 time.sleep(sleep_duration)
 
@@ -326,7 +369,7 @@ class DataManager:
 
                 # Wait standard interval even after failure before retrying
                 elapsed_time = time.monotonic() - start_time
-                sleep_duration = max(0, MEASUREMENT_INTERVAL_SEC - elapsed_time)
+                sleep_duration = max(MIN_SLEEP_SEC, MEASUREMENT_INTERVAL_SEC - elapsed_time)
                 logging.warning(f"Data generation failed. Waiting {sleep_duration:.2f} seconds before next attempt.")
                 time.sleep(sleep_duration)
 
@@ -360,8 +403,13 @@ class DataManager:
 
     def _start_watchdog(self):
         """Start a watchdog timer to monitor thread health."""
+        # Cancel any existing timer first to prevent leak
+        if self.watchdog_timer is not None:
+            self.watchdog_timer.cancel()
+            
         if self.running:
-            Timer(MEASUREMENT_INTERVAL_SEC, self._watchdog_check).start()
+            self.watchdog_timer = Timer(MEASUREMENT_INTERVAL_SEC, self._watchdog_check)
+            self.watchdog_timer.start()
 
     def _watchdog_check(self):
         """Watchdog timer callback to check thread health."""
@@ -373,16 +421,35 @@ class DataManager:
         """Stop the background data collection thread."""
         if self.running:
             self.running = False
+            
+            # Cancel the watchdog timer to prevent thread leak
+            if self.watchdog_timer is not None:
+                self.watchdog_timer.cancel()
+                self.watchdog_timer = None
+                
             if self.thread:
                 logging.info("Stopping background data collection thread...")
                 # No join needed for daemon threads
                 self.thread = None
+                
+            # Clean up BLE connections
+            self._disconnect_all_devices()
             logging.info("Background data collection thread stopped.")
 
     def get_data(self):
         """Return the current data DataFrame."""
-        # Return a copy to prevent modification from outside
-        return self.data.copy()
+        # Convert deque to DataFrame for compatibility with existing frontend
+        if self.recent_data:
+            df = pd.DataFrame(list(self.recent_data))
+            # Ensure columns are in the expected order
+            column_order = ["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"]
+            for col in column_order:
+                if col not in df.columns:
+                    df[col] = None
+            return df[column_order].copy()
+        else:
+            # Return empty DataFrame with expected structure
+            return pd.DataFrame(columns=["Timestamp", "Sens1", "Sens2", "Sens3", "Wroclaw"])
 
     def get_measurement_interval_sec(self):
         """Returns the measurement interval in seconds."""
