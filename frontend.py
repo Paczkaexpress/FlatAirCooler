@@ -4,6 +4,7 @@ import webbrowser
 import shutil
 import psutil
 import time
+import requests
 from threading import Timer
 from datetime import datetime, timedelta
 
@@ -58,6 +59,10 @@ app = dash.Dash(__name__, assets_folder='assets')
 chromium_process = None
 chromium_restart_count = 0
 MAX_CHROMIUM_RESTARTS = 5
+browser_startup_time = None
+monitoring_active = False
+CHROMIUM_STARTUP_DELAY = 15  # Give chromium more time to fully start
+CHROMIUM_CHECK_INTERVAL = 60  # Check less frequently to avoid race conditions
 
 def is_chromium_running():
     """Check if chromium is still running with our specific parameters."""
@@ -72,36 +77,55 @@ def is_chromium_running():
         logging.warning(f"Error checking chromium status: {e}")
         return False
 
+def is_dash_server_ready():
+    """Check if Dash server is responding before launching browser."""
+    try:
+        response = requests.get("http://127.0.0.1:8050/", timeout=5)
+        return response.status_code == 200
+    except Exception:
+        return False
+
 def kill_chromium_processes():
     """Kill any existing chromium processes running our app."""
     try:
+        killed_any = False
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             if proc.info['name'] and 'chromium' in proc.info['name'].lower():
                 cmdline = ' '.join(proc.info['cmdline'] or [])
                 if '--kiosk' in cmdline and '8050' in cmdline:
                     logging.info(f"Terminating chromium process PID {proc.info['pid']}")
                     proc.terminate()
+                    killed_any = True
                     try:
                         proc.wait(timeout=5)
                     except psutil.TimeoutExpired:
                         proc.kill()
+        if killed_any:
+            time.sleep(3)  # Give more time after killing processes
     except Exception as e:
         logging.warning(f"Error killing chromium processes: {e}")
 
 def open_browser() -> None:
     """Find chromium-browser and open it in kiosk mode pointing at the Dash app."""
-    global chromium_process, chromium_restart_count
+    global chromium_process, chromium_restart_count, browser_startup_time, monitoring_active
     
     if chromium_restart_count >= MAX_CHROMIUM_RESTARTS:
         logging.error(f"Maximum chromium restart attempts ({MAX_CHROMIUM_RESTARTS}) reached. Not restarting.")
         return
     
+    # Prevent concurrent browser launches
+    current_time = time.time()
+    if browser_startup_time and (current_time - browser_startup_time) < 10:
+        logging.info("Browser launch already in progress, skipping duplicate launch")
+        return
+    
+    browser_startup_time = current_time
     url = "http://127.0.0.1:8050/"
     chromium_path = shutil.which('chromium-browser')
 
-    # Kill any existing chromium processes first
-    kill_chromium_processes()
-    time.sleep(2)
+    # Only kill existing processes if we're restarting (not initial launch)
+    if chromium_restart_count > 0:
+        kill_chromium_processes()
 
     if chromium_path:
         logging.info(f"Found chromium-browser at: {chromium_path}")
@@ -128,8 +152,9 @@ def open_browser() -> None:
             chromium_restart_count += 1
             logging.info(f"Launched chromium in kiosk mode (PID: {chromium_process.pid}, restart #{chromium_restart_count})")
             
-            # Start monitoring chromium
-            Timer(10, monitor_chromium).start()
+            # Start monitoring with proper delay and only if not already active
+            if not monitoring_active:
+                Timer(CHROMIUM_STARTUP_DELAY, start_chromium_monitoring).start()
             
         except Exception as e:
             logging.error(f"Failed to launch {chromium_path}: {e}")
@@ -139,16 +164,44 @@ def open_browser() -> None:
         logging.warning("chromium-browser not found in PATH. Opening default browser instead.")
         webbrowser.open(url)
 
+def start_chromium_monitoring():
+    """Start the chromium monitoring cycle with safeguards."""
+    global monitoring_active
+    monitoring_active = True
+    monitor_chromium()
+
 def monitor_chromium():
     """Monitor chromium process and restart if needed."""
-    global chromium_process
+    global chromium_process, monitoring_active
     
-    if not is_chromium_running():
-        logging.warning("Chromium process died, attempting restart")
-        open_browser()
-    else:
-        # Schedule next check
-        Timer(30, monitor_chromium).start()
+    if not monitoring_active:
+        return
+    
+    try:
+        current_time = time.time()
+        
+        # Don't check too soon after browser startup
+        if browser_startup_time and (current_time - browser_startup_time) < CHROMIUM_STARTUP_DELAY:
+            Timer(CHROMIUM_CHECK_INTERVAL, monitor_chromium).start()
+            return
+        
+        # Check if we've hit the restart limit
+        if chromium_restart_count >= MAX_CHROMIUM_RESTARTS:
+            logging.error("Maximum restart limit reached, stopping monitoring")
+            monitoring_active = False
+            return
+        
+        if not is_chromium_running():
+            logging.warning("Chromium process died, attempting restart")
+            open_browser()
+        else:
+            # Schedule next check with longer interval
+            Timer(CHROMIUM_CHECK_INTERVAL, monitor_chromium).start()
+            
+    except Exception as e:
+        logging.error(f"Error in chromium monitoring: {e}")
+        # Continue monitoring even if there's an error
+        Timer(CHROMIUM_CHECK_INTERVAL, monitor_chromium).start()
 
 # --- Blank Figure ---
 def create_blank_fig(message: str = "No data available or graph error.") -> go.Figure:
@@ -360,16 +413,45 @@ def update_graph_live(_):
 # ────────────────────────────────────────────────────────────────────────────────
 # MAIN EXECUTION BLOCK (Moved from plot.py)
 # ────────────────────────────────────────────────────────────────────────────────
+
+def wait_for_server_and_launch_browser():
+    """Wait for Dash server to be ready, then launch browser."""
+    max_wait = 30  # Maximum wait time in seconds
+    wait_time = 0
+    
+    while wait_time < max_wait:
+        if is_dash_server_ready():
+            logging.info("Dash server is ready, launching browser")
+            open_browser()
+            return
+        else:
+            logging.info(f"Waiting for Dash server to be ready... ({wait_time}s)")
+            time.sleep(2)
+            wait_time += 2
+    
+    logging.warning("Dash server not ready after 30 seconds, launching browser anyway")
+    open_browser()
+
 if __name__ == "__main__":
     logging.info("Application starting.")
-    Timer(1, open_browser).start() # Open browser after 1 second
-    app.run(
-        debug=False,
-        dev_tools_ui=False,
-        dev_tools_props_check=False,
-        host="0.0.0.0",
-        port=8050,
-    )
+    # Start browser launch in background after server starts
+    Timer(3, wait_for_server_and_launch_browser).start()
+    
+    try:
+        app.run(
+            debug=False,
+            dev_tools_ui=False,
+            dev_tools_props_check=False,
+            host="0.0.0.0",
+            port=8050,
+        )
+    except Exception as e:
+        logging.error(f"Error starting Dash app: {e}")
+        # Cleanup - stop monitoring
+        try:
+            monitoring_active = False
+        except NameError:
+            pass  # monitoring_active might not be defined yet
     # Note: The background thread in data_manager will exit automatically
     # when the main application exits because it's a daemon thread.
     # If you needed cleanup, you could call data_manager.stop() here,
